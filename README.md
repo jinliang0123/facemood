@@ -5,7 +5,6 @@
 
 ## 執行
 ```bash
-cd mood-app
 python3 -m http.server 8080      # 然後開啟 http://localhost:8080
 ```
 相機/麥克風需要 `localhost` 或 HTTPS。建議使用 Chrome / Edge。
