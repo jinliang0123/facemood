@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>心語 · 人臉語音心情分析</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="mode-user" data-screen="start">
+
+<!-- ============ 開始畫面 ============ -->
+<section id="screen-start">
+  <div class="start-card">
+    <h1>心語 <small>人臉 × 語音 心情分析</small></h1>
+    <p class="lead">虛擬人「心語」會用幾個心理學情境問題和你對話,同時由相機與麥克風即時分析你的情緒變化,結束後產生心情分析報告。</p>
+
+    <fieldset>
+      <legend>選擇模式</legend>
+      <label class="radio"><input type="radio" name="mode" value="user" checked>
+        <span><b>使用者模式</b>只顯示虛擬人影像與音量指示燈條</span></label>
+      <label class="radio"><input type="radio" name="mode" value="eng">
+        <span><b>工程模式</b>顯示原始影像、分析影像、情緒分數、音訊分析與處理狀態</span></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>選項</legend>
+      <label class="check"><input type="checkbox" id="opt-stt">
+        啟用語音轉文字(僅用於字幕與關鍵詞語意參考;瀏覽器可能將音訊傳到雲端辨識服務)</label>
+      <label class="check"><input type="checkbox" id="opt-tts" checked>
+        虛擬人使用語音說話(關閉則只顯示字幕)</label>
+    </fieldset>
+
+    <div class="notice">
+      <b>隱私與使用說明</b>
+      影像與聲音只在你的瀏覽器內即時處理,不會上傳或儲存到伺服器。問題會引導你回想喜、怒、哀、樂的經驗,你可以隨時按
+      <kbd>Esc</kbd> 結束。本工具僅為研究/示範用途,<b>不是醫療或心理診斷</b>。
+    </div>
+
+    <div class="start-actions">
+      <button id="btn-start" class="primary" disabled>載入模型中…</button>
+      <span id="start-status" class="muted"></span>
+    </div>
+    <p class="muted small">對話中按 <kbd>E</kbd> 可切換工程/使用者模式,<kbd>N</kbd> 跳到下一題,<kbd>Esc</kbd> 結束並產生報告。</p>
+  </div>
+</section>
+
+<!-- ============ 對話畫面 ============ -->
+<main id="screen-session" hidden>
+
+  <!-- 使用者模式:只有虛擬人 + 音量燈條 -->
+  <div id="user-view">
+    <canvas id="avatar-user" width="600" height="720"></canvas>
+    <div id="subtitle" class="subtitle" hidden></div>
+    <div class="led-wrap" aria-label="麥克風音量">
+      <div id="led" class="led"></div>
+    </div>
+  </div>
+
+  <!-- 工程模式 -->
+  <div id="eng-view">
+    <header class="eng-head">
+      <div class="chips">
+        <span class="chip" id="h-state">待機</span>
+        <span class="chip" id="h-q">Q –</span>
+        <span class="chip" id="h-time">00:00</span>
+      </div>
+      <div class="eng-actions">
+        <button id="btn-next">下一題 (N)</button>
+        <button id="btn-switch">切換使用者模式 (E)</button>
+        <button id="btn-end" class="danger">結束並產生報告 (Esc)</button>
+      </div>
+    </header>
+
+    <div class="eng-grid">
+      <section class="panel p-raw">
+        <h2>① 正常影像</h2>
+        <div class="vid"><video id="cam" autoplay muted playsinline></video></div>
+      </section>
+
+      <section class="panel p-ana">
+        <h2>② 分析中影像 + 情緒分數</h2>
+        <div class="ana-row">
+          <div class="vid"><canvas id="ana"></canvas><div id="nofacebadge" class="badge">未偵測到人臉</div></div>
+          <div class="scores" id="scores"></div>
+        </div>
+      </section>
+
+      <section class="panel p-avatar">
+        <h2>③ 虛擬人 / 對話</h2>
+        <canvas id="avatar-eng" width="300" height="360"></canvas>
+        <div id="dlg-log" class="log"></div>
+      </section>
+
+      <section class="panel p-audio">
+        <h2>④ 音訊分析</h2>
+        <div class="audio-grid">
+          <div><div class="lbl">波形</div><canvas id="wave" width="420" height="90"></canvas></div>
+          <div><div class="lbl">頻譜</div><canvas id="spec" width="420" height="90"></canvas></div>
+        </div>
+        <div class="meter"><div id="meter-fill"></div></div>
+        <div class="kv" id="audio-kv"></div>
+      </section>
+
+      <section class="panel p-pipe">
+        <h2>⑤ 處理狀態</h2>
+        <div id="pipe" class="pipe"></div>
+      </section>
+
+      <section class="panel p-feat">
+        <h2>⑥ 用什麼特徵判斷心情?</h2>
+        <div id="feat-table"></div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<!-- ============ 報告 ============ -->
+<section id="screen-report" hidden>
+  <div class="report" id="report"></div>
+</section>
+
+<script src="vendor/face-api.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
