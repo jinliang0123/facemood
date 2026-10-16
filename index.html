@@ -101,6 +101,13 @@
         <div class="kv" id="audio-kv"></div>
       </section>
 
+      <section class="panel p-hr">
+        <h2>⑦ 心率 (rPPG · 由臉部膚色變化估計)</h2>
+        <div class="hr-big"><b id="hr-bpm">–</b> <span>bpm</span> <span id="hr-state" class="muted small"></span></div>
+        <canvas id="hr-wave" width="420" height="90"></canvas>
+        <div class="kv" id="hr-kv"></div>
+      </section>
+
       <section class="panel p-pipe">
         <h2>⑤ 處理狀態</h2>
         <div id="pipe" class="pipe"></div>
@@ -120,6 +127,7 @@
 </section>
 
 <script src="vendor/face-api.js"></script>
+<script src="rppg.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

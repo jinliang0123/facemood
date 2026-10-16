@@ -254,10 +254,11 @@ function landmarkFeatures(pts, prev) {
 }
 
 /* ================================================================ 情緒融合 */
-function fuse(face, voice, voiceActive) {
+function fuse(face, voice, voiceActive, hrA) {
   const p = face.p, f = face.feat;
   const arousalFace = clamp(0.2 + 0.9 * (p.surprised + p.angry + p.fearful) + 0.4 * p.happy + 4 * f.motion + 0.5 * clamp(f.mar * 1.5), 0, 1);
-  const arousal = voiceActive ? 0.5 * arousalFace + 0.5 * voice.arousal : arousalFace;
+  let arousal = voiceActive ? 0.5 * arousalFace + 0.5 * voice.arousal : arousalFace;
+  if (hrA != null) arousal = 0.75 * arousal + 0.25 * hrA;   // 心率相對基準升高 → 覺醒度升高
   const smileBoost = clamp(f.smile / 0.06);
   const happy = clamp(p.happy * 0.85 + 0.15 * smileBoost);
   const hi = clamp(0.25 + 0.75 * arousal);              // 高喚醒的愉悅 = 喜;低喚醒的愉悅 = 樂
@@ -285,6 +286,7 @@ const S = {
   lastFace: null, prevFeat: null, faceFps: 0, faceLatency: 0, faceFrames: 0, faceHits: 0,
   smooth: Object.fromEntries(EMO.map(e => [e.k, e.k === 'calm' ? 1 : 0])), smoothVal: 0, smoothAro: 0.3,
   samples: [], blinks: 0, blinkState: false,
+  rppg: new RPPG(), hr: { bpm: null, q: 0, ok: false, span: 0, wave: [], reason: '' }, hrBase: null, hrBaseVals: [], motionEma: 0, roiCv: null,
   pipe: {},
   dlg: { i: -1, state: 'idle', t0: 0, voiceSec: 0, lastVoice: 0, nudged: false, skip: false, transcripts: [], ttsOk: false },
   texts: [], // {q, text}
@@ -294,7 +296,7 @@ const S = {
 /* ================================================================ 處理管線狀態 */
 const PIPE_DEF = [
   ['cam', '相機'], ['mic', '麥克風'], ['model', '人臉模型 (TinyFaceDetector / 68點 / 表情CNN)'], ['face', '人臉偵測'],
-  ['expr', '表情分類 → 情緒機率'], ['audio', '音訊特徵擷取'], ['fusion', '多模態融合 (5 Hz)'], ['tts', '虛擬人語音 TTS'], ['stt', '語音轉文字 STT'],
+  ['expr', '表情分類 → 情緒機率'], ['audio', '音訊特徵擷取'], ['rppg', '心率 rPPG (POS 演算法)'], ['fusion', '多模態融合 (5 Hz)'], ['tts', '虛擬人語音 TTS'], ['stt', '語音轉文字 STT'],
 ];
 function setPipe(key, state, detail = '') { S.pipe[key] = { state, detail }; }
 function renderPipe() {
@@ -355,6 +357,9 @@ function renderFeatTable() {
     ${row('眼開度 EAR', F ? fmt(F.eyeOpen, 2) : '–', '睜大(驚訝)/ 眨眼率(緊張或疲勞)')}
     ${row('眨眼次數', S.blinks, '累計;短時間大量眨眼 → 緊張')}
     ${row('頭部運動', F ? fmt(F.motion * 100, 1) + '%' : '–', '大幅動作 → 提高覺醒度')}
+    ${hdr('臉部 · rPPG 心率(膚色微小起伏)')}
+    ${row('心率', S.hr.ok ? S.hr.bpm + ' bpm' : '–', '心率相對個人基準升高 → 提高覺醒度(權重 25%)')}
+    ${row('訊號品質', fmt(S.hr.q, 2), '脈搏頻帶能量占比,<0.40 不採用')}
     ${hdr('語音 · 聲學特徵(僅在受測者作答時)')}
     ${row('音量', fmt(v.db, 0) + ' dB', '相對自身基準的 z 分數 → 覺醒度')}
     ${row('音高 F0 / 變化', v.f0 ? `${fmt(v.f0, 0)} Hz / ${fmt(v.f0sd, 1)} st` : '–', '音高升高、起伏大 → 覺醒度高')}
@@ -411,9 +416,60 @@ function drawAnalysis(det) {
   poly(0, 16, false, '#9aa7c2'); poly(17, 21, false, '#facc15'); poly(22, 26, false, '#facc15'); poly(27, 30, false, '#9aa7c2'); poly(30, 35, false, '#9aa7c2');
   poly(36, 41, true, '#34d399'); poly(42, 47, true, '#34d399'); poly(48, 59, true, '#f87171'); poly(60, 67, true, '#fb923c');
   ctx.fillStyle = '#fff'; for (const p of pts) { ctx.beginPath(); ctx.arc(p.x, p.y, 1.8, 0, 7); ctx.fill(); }
+  if (S.lastFace && S.lastFace.roi) { ctx.strokeStyle = 'rgba(255,138,138,.9)'; ctx.lineWidth = 1.5; for (const [x0, y0, x1, y1] of S.lastFace.roi) ctx.strokeRect(x0, y0, x1 - x0, y1 - y0); }
   // 標示關鍵量測線:嘴角連線、眉到眼距離
   ctx.setLineDash([4, 3]); ctx.strokeStyle = '#ff6'; ctx.beginPath(); ctx.moveTo(pts[48].x, pts[48].y); ctx.lineTo(pts[54].x, pts[54].y); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(pts[19].x, pts[19].y); ctx.lineTo(pts[37].x, pts[37].y); ctx.moveTo(pts[24].x, pts[24].y); ctx.lineTo(pts[44].x, pts[44].y); ctx.stroke(); ctx.setLineDash([]);
+}
+
+/* ================================================================ rPPG:ROI 取樣與心率估計 */
+function faceRois(pts, vw, vh) {
+  const fw = dist(pts[0], pts[16]), fh = dist(pts[27], pts[8]) || 1;
+  const browY = Math.min(...pts.slice(17, 27).map(p => p.y));
+  const R = [
+    [pts[19].x, browY - 0.32 * fh, pts[24].x, browY - 0.08 * fh],                                // 額頭
+    [pts[2].x + 0.04 * fw, pts[29].y, pts[31].x - 0.06 * fw, pts[48].y - 0.02 * fh],            // 左臉頰
+    [pts[35].x + 0.06 * fw, pts[29].y, pts[14].x - 0.04 * fw, pts[54].y - 0.02 * fh],           // 右臉頰
+  ];
+  return R.map(([x0, y0, x1, y1]) => [Math.max(0, x0), Math.max(0, y0), Math.min(vw, x1), Math.min(vh, y1)]).filter(r => r[2] - r[0] > 4 && r[3] - r[1] > 4);
+}
+function rppgSample() { // 約 30 Hz,獨立於人臉偵測頻率,使用最近一次的 ROI
+  const cam = $('cam'), f = S.lastFace;
+  if (!S.running || !f || !f.roi || f.roi.length < 2 || performance.now() - f.tt > 600 || !cam.videoWidth) return;
+  const cv = S.roiCv || (S.roiCv = Object.assign(document.createElement('canvas'), { width: 160, height: 120 }));
+  const ctx = cv.getContext('2d', { willReadFrequently: true }), sx = cv.width / cam.videoWidth, sy = cv.height / cam.videoHeight;
+  ctx.drawImage(cam, 0, 0, cv.width, cv.height);
+  let r = 0, g = 0, b = 0, n = 0;
+  for (const [x0, y0, x1, y1] of f.roi) {
+    const X = Math.floor(x0 * sx), Y = Math.floor(y0 * sy), W = Math.max(1, Math.floor((x1 - x0) * sx)), H = Math.max(1, Math.floor((y1 - y0) * sy));
+    const d = ctx.getImageData(X, Y, W, H).data;
+    for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+  }
+  if (n) S.rppg.push(performance.now() / 1000, r / n, g / n, b / n);
+}
+function rppgEstimate() { // 每秒一次
+  const o = S.rppg.estimate(); let reason = '';
+  if (o.span < S.rppg.minSec) reason = `累積資料中 (${fmt(o.span, 0)}/${S.rppg.minSec} 秒)`;
+  else if (S.motionEma > 0.03) { reason = '頭部移動過大'; o.ok = false; o.bpm = null; }
+  else if (!o.ok) reason = '訊號品質不足(說話/光線/動作)';
+  S.hr = Object.assign(o, { reason });
+  if (o.ok && S.hrBase == null && S.dlg.i === 0) {                       // 暖身題期間建立個人心率基準
+    S.hrBaseVals.push(o.bpm); if (S.hrBaseVals.length >= 8) S.hrBase = [...S.hrBaseVals].sort((a, b) => a - b)[S.hrBaseVals.length >> 1];
+  }
+  if (S.hrBase == null && S.dlg.i > 0 && S.hrBaseVals.length >= 3) S.hrBase = [...S.hrBaseVals].sort((a, b) => a - b)[S.hrBaseVals.length >> 1];
+  setPipe('rppg', o.ok ? 'ok' : 'warn', o.ok ? `${o.bpm} bpm · 品質 ${fmt(o.q, 2)}` : reason);
+}
+function drawHr() {
+  const h = S.hr, c = $('hr-wave'), ctx = c.getContext('2d'); ctx.fillStyle = '#0b1020'; ctx.fillRect(0, 0, c.width, c.height);
+  if (h.wave && h.wave.length) {
+    const mx = Math.max(1e-6, ...h.wave.map(Math.abs)); ctx.strokeStyle = h.ok ? '#ff8a8a' : '#6b7690'; ctx.lineWidth = 1.5; ctx.beginPath();
+    h.wave.forEach((v, i) => { const x = i / h.wave.length * c.width, y = c.height / 2 - v / mx * c.height * 0.42; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.stroke();
+  }
+  $('hr-bpm').textContent = h.ok ? h.bpm : '–';
+  $('hr-state').textContent = h.ok ? '訊號良好' : h.reason;
+  $('hr-kv').innerHTML = [['訊號品質', fmt(h.q, 2) + (h.ok ? '' : ' (<0.40 不採用)')], ['個人基準', S.hrBase != null ? S.hrBase + ' bpm' : '建立中'],
+    ['相對基準', h.ok && S.hrBase != null ? (h.bpm - S.hrBase >= 0 ? '+' : '') + (h.bpm - S.hrBase) + ' bpm' : '–'], ['頻譜峰值', h.raw ? h.raw + ' bpm' : '–']]
+    .map(([k, x]) => `<div>${k}<b>${x}</b></div>`).join('');
 }
 
 /* ================================================================ 人臉偵測迴圈 */
@@ -430,7 +486,9 @@ async function faceLoop() {
           S.faceHits++;
           const pts = det.landmarks.positions, feat = landmarkFeatures(pts, S.prevFeat); S.prevFeat = feat;
           const p = det.expressions;
-          S.lastFace = { p: { neutral: p.neutral, happy: p.happy, sad: p.sad, angry: p.angry, fearful: p.fearful, disgusted: p.disgusted, surprised: p.surprised }, feat, tt: performance.now() };
+          const roi = faceRois(pts, cam.videoWidth, cam.videoHeight);
+          S.motionEma = lerp(S.motionEma, feat.motion, 0.2);
+          S.lastFace = { roi, p: { neutral: p.neutral, happy: p.happy, sad: p.sad, angry: p.angry, fearful: p.fearful, disgusted: p.disgusted, surprised: p.surprised }, feat, tt: performance.now() };
           const closed = feat.eyeOpen < 0.19; if (closed && !S.blinkState) S.blinks++; S.blinkState = closed;
           setPipe('face', 'ok', `偵測信心 ${pct(det.detection.score)}`);
           setPipe('expr', 'ok', EMO_TOP7(p));
@@ -456,7 +514,8 @@ function sampleTick() {
   const face = S.lastFace && performance.now() - S.lastFace.tt < 1000 ? S.lastFace : null;
   let fused = null;
   if (face) {
-    fused = fuse(face, v, voiceActive);
+    const hrA = S.hr.ok && S.hrBase != null ? clamp(0.5 + (S.hr.bpm - S.hrBase) / 24) : null;
+    fused = fuse(face, v, voiceActive, hrA);
     const a = 0.3;
     for (const k in fused.scores) S.smooth[k] = lerp(S.smooth[k], fused.scores[k], a);
     S.smoothVal = lerp(S.smoothVal, fused.valence, a); S.smoothAro = lerp(S.smoothAro, fused.arousal, a);
@@ -466,6 +525,7 @@ function sampleTick() {
   S.samples.push({
     t: now, q: d.i, st: d.state, face: !!face,
     s: fused ? { ...S.smooth } : null, val: fused ? S.smoothVal : null, aro: fused ? S.smoothAro : null,
+    hr: S.hr.ok ? S.hr.bpm : null, hrq: S.hr.q,
     db: v.db, f0: v.f0, vad: voiceActive, rate: v.rate, cen: v.cen, aroV: v.arousal,
     feat: face ? { smile: face.feat.smile, mar: face.feat.mar, brow: face.feat.browRaise, furrow: face.feat.furrow, ear: face.feat.eyeOpen, motion: face.feat.motion } : null,
     p: face ? face.p : null,
@@ -567,7 +627,9 @@ async function startSession() {
   S.timers = [
     setInterval(() => { const v = S.audio.step((performance.now() - S.T0) / 1000, S.dlg.state === 'listening'); renderLed(v.level); if (S.mode === 'eng') drawAudio(); }, 50),
     setInterval(sampleTick, 200),
-    setInterval(() => { if (S.mode === 'eng') { renderScores(); renderPipe(); renderFeatTable(); $('h-time').textContent = mmss((performance.now() - S.T0) / 1000); } }, 250),
+    setInterval(rppgSample, 33),
+    setInterval(rppgEstimate, 1000),
+    setInterval(() => { if (S.mode === 'eng') { renderScores(); renderPipe(); renderFeatTable(); drawHr(); $('h-time').textContent = mmss((performance.now() - S.T0) / 1000); } }, 250),
   ];
   faceLoop(); speechSynthesis && speechSynthesis.getVoices(); runDialog();
 }
@@ -588,6 +650,7 @@ function aggregate(samples) {
   const peak = {}; for (const e of EMO) peak[e.k] = f.length ? Math.max(...f.map(s => s.s[e.k])) : 0;
   const voiced = samples.filter(s => s.vad);
   return {
+    hr: (() => { const h = samples.filter(x => x.hr != null).map(x => x.hr); return h.length ? mean(h) : null; })(), nHr: samples.filter(x => x.hr != null).length,
     n: samples.length, nFace: f.length, sc, peak, val: mean(f.map(s => s.val)), aro: mean(f.map(s => s.aro)), valSd: std(f.map(s => s.val)),
     db: voiced.length ? mean(voiced.map(s => s.db)) : null, f0: mean(voiced.filter(s => s.f0).map(s => s.f0)) || null,
     rate: voiced.length ? mean(voiced.map(s => s.rate)) : null, voiceSec: voiced.length * 0.2,
@@ -610,6 +673,8 @@ function buildReport() {
   const warnings = [];
   if (totalFaceRate < 0.6) warnings.push(`人臉偵測率僅 ${pct(totalFaceRate)},結果可信度較低。請確認光線充足、臉部正對鏡頭且不被遮擋。`);
   if (all.voiceSec < 15) warnings.push(`偵測到的說話時間僅約 ${fmt(all.voiceSec, 0)} 秒,語音覺醒度估計不足。請確認麥克風正常並多開口回答。`);
+  const hrRate = answering.length ? all.nHr / answering.length : 0;
+  if (all.nFace && hrRate < 0.3) warnings.push(`心率(rPPG)有效量測比例僅 ${pct(hrRate)}(說話、移動或光線不穩會使膚色訊號失真),心率數據僅供參考,已降低其在分析中的影響。`);
   if (!all.nFace) warnings.push('整段對話幾乎沒有分析到人臉,無法產生情緒分數。');
 
   const insights = [];
@@ -629,6 +694,10 @@ function buildReport() {
     if (strongest) insights.push(`四個情境中,反應最明顯的是「${EMO_BY_KEY[strongest.q.target].n}」。`);
     const hiAro = per.slice(1, 5).filter(p => p.a.nFace).sort((a, b) => b.a.aro - a.a.aro)[0];
     if (hiAro) insights.push(`覺醒度最高的題目是「${hiAro.q.title}」(${fmt(hiAro.a.aro, 2)}),代表這個話題最讓你投入或激動。`);
+    if (base.hr != null) {
+      const hrUp = per.slice(1, 5).filter(p => p.a.hr != null).sort((a, b) => b.a.hr - a.a.hr)[0];
+      if (hrUp) { const d = hrUp.a.hr - base.hr; insights.push(`心率:暖身基準約 ${fmt(base.hr, 0)} bpm;「${hrUp.q.title}」時最高(${fmt(hrUp.a.hr, 0)} bpm,${d >= 0 ? '+' : ''}${fmt(d, 0)}),${d >= 5 ? '代表生理上較為激動。' : '與基準相差不大。'}`); }
+    }
     const close = per[5].a; if (close.nFace) insights.push(`收尾題的平均效價為 ${fmt(close.val, 2)}${close.val >= base.val ? ',情緒已回到不低於起始水準。' : ',情緒尚未完全回到起始水準,結束後可以做點讓自己放鬆的事。'}`);
   }
   const tv = textValence(S.texts.map(t => t.text).join(''));
@@ -649,6 +718,7 @@ function buildReport() {
         <div class="kpi"><div class="t">主要情緒傾向</div><div class="n">${all.nFace ? dominantOf(all.sc, true).n : '–'}</div></div>
         <div class="kpi"><div class="t">平均效價</div><div class="n">${all.nFace ? fmt(all.val, 2) : '–'}</div></div>
         <div class="kpi"><div class="t">平均覺醒度</div><div class="n">${all.nFace ? fmt(all.aro, 2) : '–'}</div></div>
+        <div class="kpi"><div class="t">平均心率 (rPPG)</div><div class="n">${all.hr != null ? fmt(all.hr, 0) + ' bpm' : '–'}</div></div>
         <div class="kpi"><div class="t">人臉偵測率</div><div class="n">${pct(totalFaceRate)}</div></div>
         <div class="kpi"><div class="t">說話時間</div><div class="n">${fmt(all.voiceSec, 0)} 秒</div></div>
       </div>
@@ -664,13 +734,14 @@ function buildReport() {
 
     <h2>各題分析</h2>
     <div class="card" style="overflow:auto"><table class="qtable">
-      <tr><th>題目</th><th>情緒組成(作答時)</th><th>目標情緒反應</th><th>效價 / 覺醒</th><th>語音</th></tr>
+      <tr><th>題目</th><th>情緒組成(作答時)</th><th>目標情緒反應</th><th>效價 / 覺醒</th><th>心率</th><th>語音</th></tr>
       ${per.map(p => {
         const a = p.a, e = EMO_BY_KEY[p.q.target], d = a.sc[p.q.target] - base.sc[p.q.target];
         return `<tr><td><b>Q${p.i + 1} ${p.q.title}</b></td>
         <td style="min-width:200px">${a.nFace ? stackBar(a.sc) : '<span class="muted">無人臉資料</span>'}</td>
         <td>${a.nFace ? (p.i === 0 || p.i === 5 ? '–' : `${e.n} ${pct(a.sc[e.k])}<br><span class="muted">Δ基準 ${d >= 0 ? '+' : ''}${(d * 100).toFixed(0)}pp · 峰值 ${pct(a.peak[e.k])}</span>`) : '–'}</td>
         <td>${a.nFace ? `${fmt(a.val, 2)} / ${fmt(a.aro, 2)}` : '–'}</td>
+        <td>${a.hr != null ? `${fmt(a.hr, 0)} bpm${p.i > 0 && base.hr != null ? `<br><span class="muted">Δ基準 ${a.hr - base.hr >= 0 ? '+' : ''}${fmt(a.hr - base.hr, 0)}</span>` : ''}` : '<span class="muted">–</span>'}</td>
         <td>${a.db != null ? `${fmt(a.db, 0)} dB<br>${a.f0 ? fmt(a.f0, 0) + ' Hz · ' : ''}${fmt(a.rate, 1)} 音節/s<br><span class="muted">說話 ${fmt(a.voiceSec, 0)} 秒</span>` : '<span class="muted">未偵測到說話</span>'}</td></tr>`;
       }).join('')}
     </table></div>
@@ -682,7 +753,7 @@ function buildReport() {
     <h2>分析方法與限制</h2>
     <div class="card disclaimer">
       臉部:以 TinyFaceDetector 偵測人臉、68 點特徵點擷取嘴角、眉毛、眼睛幾何,並以表情 CNN 輸出 7 類表情機率;
-      語音:音量(dB)、音高(F0)、語速、頻譜重心,相對受測者自身基準估計覺醒度;兩者融合為喜、怒、哀、樂、平靜五項分數。<br><br>
+      語音:音量(dB)、音高(F0)、語速、頻譜重心,相對受測者自身基準估計覺醒度;心率:以額頭與雙頰膚色的細微變化(rPPG,POS 演算法)估計,僅在訊號品質足夠時採用,並以暖身題為個人基準;以上融合為喜、怒、哀、樂、平靜五項分數。<br><br>
       本報告反映的是「表情與聲音的外在表現」,並非內在感受或醫療/心理診斷。每個人的表情幅度、文化、光線、角度、鏡頭與麥克風品質都會影響結果。若你長期感到情緒困擾,請諮詢專業心理或醫療人員。
     </div>`;
 
@@ -691,8 +762,8 @@ function buildReport() {
   $('r-again').onclick = () => location.reload();
   $('r-json').onclick = () => download('mood-report.json', JSON.stringify({ script: SCRIPT.map(q => q.title), samples: S.samples, texts: S.texts }), 'application/json');
   $('r-csv').onclick = () => {
-    const head = ['t', 'question', 'state', 'face', ...EMO.map(e => e.k), 'valence', 'arousal', 'db', 'f0', 'rate', 'voice_arousal'];
-    const rows = S.samples.map(s => [s.t.toFixed(1), s.q + 1, s.st, s.face ? 1 : 0, ...EMO.map(e => s.s ? s.s[e.k].toFixed(3) : ''), s.val != null ? s.val.toFixed(3) : '', s.aro != null ? s.aro.toFixed(3) : '', s.db.toFixed(1), s.f0 ? s.f0.toFixed(0) : '', s.rate.toFixed(2), s.aroV.toFixed(2)].join(','));
+    const head = ['t', 'question', 'state', 'face', ...EMO.map(e => e.k), 'valence', 'arousal', 'db', 'f0', 'rate', 'voice_arousal', 'hr_bpm', 'hr_quality'];
+    const rows = S.samples.map(s => [s.t.toFixed(1), s.q + 1, s.st, s.face ? 1 : 0, ...EMO.map(e => s.s ? s.s[e.k].toFixed(3) : ''), s.val != null ? s.val.toFixed(3) : '', s.aro != null ? s.aro.toFixed(3) : '', s.db.toFixed(1), s.f0 ? s.f0.toFixed(0) : '', s.rate.toFixed(2), s.aroV.toFixed(2), s.hr != null ? s.hr : '', s.hrq != null ? s.hrq.toFixed(2) : ''].join(','));
     download('mood-timeline.csv', '﻿' + [head.join(','), ...rows].join('\n'), 'text/csv');
   };
 }

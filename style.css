@@ -64,13 +64,13 @@ body.mode-user #eng-view { /* 保持運作(影片需持續解碼)但移出畫面
 .chips { display: flex; gap: 8px; } .eng-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .chip { background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; font-size: 13px; }
 .chip.live { border-color: var(--pleasure); color: #8ff0c4; }
-.eng-grid { display: grid; gap: 12px; grid-template-columns: 1fr 1.7fr 1fr; grid-template-areas: "raw ana avatar" "audio pipe feat"; }
+.eng-grid { display: grid; gap: 12px; grid-template-columns: 1fr 1.7fr 1fr; grid-template-areas: "raw ana avatar" "audio pipe feat" "hr pipe feat"; }
 .p-raw { grid-area: raw; } .p-ana { grid-area: ana; } .p-avatar { grid-area: avatar; }
-.p-audio { grid-area: audio; } .p-pipe { grid-area: pipe; } .p-feat { grid-area: feat; }
+.p-hr { grid-area: hr; } .p-audio { grid-area: audio; } .p-pipe { grid-area: pipe; } .p-feat { grid-area: feat; }
 @media (max-width: 1200px) {
-  .eng-grid { grid-template-columns: 1fr 1fr; grid-template-areas: "raw ana" "avatar avatar" "audio pipe" "feat feat"; }
+  .eng-grid { grid-template-columns: 1fr 1fr; grid-template-areas: "raw ana" "avatar avatar" "audio pipe" "hr hr" "feat feat"; }
 }
-@media (max-width: 760px) { .eng-grid { grid-template-columns: 1fr; grid-template-areas: "raw" "ana" "avatar" "audio" "pipe" "feat"; } }
+@media (max-width: 760px) { .eng-grid { grid-template-columns: 1fr; grid-template-areas: "raw" "ana" "avatar" "audio" "hr" "pipe" "feat"; } }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; min-width: 0; }
 .panel h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin-bottom: 8px; }
 .vid { position: relative; background: #000; border-radius: 8px; overflow: hidden; }
@@ -134,3 +134,6 @@ body.mode-user #eng-view { /* 保持運作(影片需持續解碼)但移出畫面
   body { background: #fff; color: #000; } .card, .kpi { background: #fff; border-color: #bbb; color: #000; }
   .report-actions { display: none; } .report canvas { background: #fff; }
 }
+
+.hr-big { font-size: 14px; } .hr-big b { font-size: 34px; color: #ff8a8a; font-variant-numeric: tabular-nums; }
+.p-hr canvas { width: 100%; height: auto; background: #0b1020; border-radius: 6px; margin: 6px 0; }
